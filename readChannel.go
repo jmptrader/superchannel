@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/garyburd/redigo/redis"
 )
@@ -43,25 +42,10 @@ import (
 func main() {
 
 	rch := Make("gameStream", 5)
-	rch <- "hello"
-	rch <- "how are you?"
-	rch <- "sup? g?"
 
-	time.Sleep(time.Millisecond * 500)
-
-	//this will panic if you later try to write to the closed channel (expected behavior)
-	//REMEMBER: a closed channel is a promise that you no longer will send to it.
-	//rch.Close()
-
-	rch <- "adding more"
-	rch <- "a little more"
-
-	for i := 0; i < 22; i++ {
-		rch <- fmt.Sprintf("%d", i)
-		if i%7 == 0 {
-			time.Sleep(time.Millisecond * 75)
-		}
-	}
+	fmt.Println("Result: ", <-rch)
+	fmt.Println("Result: ", <-rch)
+	fmt.Println("Result: ", <-rch)
 
 	rch.Close()
 
@@ -82,7 +66,7 @@ func Make(channelName string, bufferSize int) RedisChannel {
 	ch := make(RedisChannel, bufferSize)
 	ch.process(func() {
 		//NOTE: do we really need to grow the buffer and allocate a new one everytime we flush?  Room for optimization?
-		buffer := make([]string, 0, bufferSize)
+		//buffer := make([]string, 0, bufferSize)
 
 		//setup Redis, we should probably move this somewhere else, like load it up from a local config file.
 		c, err := redis.Dial("tcp", "csp.loopnet.com:6379")
@@ -92,44 +76,32 @@ func Make(channelName string, bufferSize int) RedisChannel {
 		}
 		defer c.Close()
 
-		//CLEANUP!!!! DELETE THE INITIAL QUEUE
-		_, err = c.Do("DEL", channelName)
-		if err != nil {
-			log.Fatal("Could NOT cleanup the Redis queue")
-		}
-
-	CLOSE_ME:
+		//SANITY: do key exists check here to make sure we can read from something that exists???? Perhaps not necessary.
 		for {
-			select {
-			case result := <-ch:
-				if result == CLOSE_TOKEN {
-					fmt.Println("closing, attemp to break out of loop")
-					close(ch)
-					break CLOSE_ME
-				} else {
-					fmt.Println("Appending: ", result)
-					buffer = append(buffer, result)
-				}
 
-			case <-time.After(time.Millisecond * 40):
-				if len(buffer) > 0 {
-					fmt.Print("Flushing: ")
-					fmt.Println(buffer)
+			//BLPOP: block indefinately until a value becomes available to consume!
+			//will block even if the channelName doesn't exist!
+			//fmt.Println("waiting...")
+			rep, err := redis.Values(c.Do("BLPOP", channelName, 0))
 
-					c.Send("MULTI")
-					for _, val := range buffer {
-						c.Send("RPUSH", channelName, val)
-					}
-					_, err := c.Do("EXEC")
+			if err != nil {
+				log.Println(err)
+				log.Fatalf("Uh no!")
 
-					//TODO: handle the error better, maybe retry...gracefully fail...etc.
-					if err != nil {
-						log.Fatal("Oh no! An error occured doing a pipelined transaction on the queue: ", channelName)
-					}
-					//clear buffer
-					buffer = make([]string, 0, bufferSize)
-				}
 			}
+
+			//fmt.Println("Reply: ")
+			//fmt.Println(rep)
+
+			var result string
+			var key string
+			if _, err = redis.Scan(rep, &key, &result); err != nil {
+				log.Println(err)
+				log.Fatal("Couldn't parse reply")
+			}
+
+			//fmt.Println("Result: ", result)
+			ch <- result
 		}
 
 		fmt.Println("Closing redis connection from defer statement")
